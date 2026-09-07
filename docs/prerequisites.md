@@ -43,18 +43,22 @@ for you.
 
 ## Configuration
 
-Two environment variables on the server:
+Two environment variables on the server, both optional:
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `LLM_API_KEY` | Server API key. **Required**, the script has no fallback. | none |
-| `LLM_ROOT_DIR` | Where the binaries, logs and state file live | `D:\LLM-Setup` |
+| `LLM_ROOT_DIR` | Where the binaries, logs and instance files live | `D:\LLM-Setup` |
+| `LLM_MODELS_DIR` | Where the GGUF weights live | `D:\models` |
 
-Generate the key with `openssl rand -base64 24`. The same value must be set as
-`LLM_API_KEY` on every client.
+Set neither and the defaults above apply. No key is involved: the server runs
+without `--api-key`, and the client needs no credential. See the security section
+of the [main README](../README.md) for what that leaves open and how to put a key
+back if your network calls for one.
 
-Model weight paths are still absolute inside `$Models`. Adjust them to your
-installation; they are the only remaining hard-coded paths.
+The script tracks what it started under `$LLM_ROOT_DIR\instances\`, one JSON file
+per running instance, created on start and removed on stop. Nothing else reads
+those files, so deleting one by hand only loses the tracking, never the process:
+`-Action stop` without `-Name` still kills every `llama-server` it finds.
 
 ## One thing to check before benchmarking
 

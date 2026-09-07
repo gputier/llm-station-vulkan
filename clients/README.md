@@ -1,28 +1,34 @@
 # Launcher
 
-`aziz` starts Qwen3-VL-4B on the server if needed, waits for it to answer, then
-hands over to Claude Code pointed at it.
+`vlthink` starts Qwen3-VL-4B Thinking on the server if needed, waits for it to
+answer, then hands over to Claude Code pointed at it. Loading a cold server and
+proving it answers takes about ten seconds.
+
+**Opening the session itself does not.** Claude Code sends ~35000 tokens of
+instructions at every start, and an RDNA1 card ingests them on a collapsing
+curve, so budget around half an hour before the first word. The launcher prints
+that warning with its figures every time rather than letting you discover it
+after ten silent minutes. The cost is paid once per session; later turns are
+fast. See the main README for why no setting fixes this.
 
 ```bash
 export LLM_HOST=your-server-hostname-or-ip
 export LLM_SSH_USER=your-ssh-user
-export LLM_API_KEY=the-key-the-server-runs-with
 
-./aziz
+./vlthink
 ```
 
-`LLM_API_KEY` has no default: the script fails immediately if it is unset, rather
-than sending unauthenticated requests that would be refused with a confusing
-error.
+No credential is needed: the server runs without `--api-key`. The launcher still
+exports a placeholder `ANTHROPIC_AUTH_TOKEN`, whose value is never checked, so
+that the client has something to send.
 
 ## What it does
 
 Same five steps as the [CUDA launchers](../../llm-station-cuda/clients/):
 
 1. `GET /health` to see if a server is up. This endpoint stays open without a key.
-2. `GET /props` and read `model_path` to see **which** model is loaded. Unlike
-   the CUDA box, **this call needs the key**, since the server authenticates
-   everything except health.
+2. `GET /props` and read `model_path` to see **which** model is loaded. Open,
+   like `/health`, and like its CUDA counterpart.
 3. If the wrong model is loaded, ask before swapping.
 4. Load over SSH, poll until it actually answers, up to 180 s.
 5. `export` the environment and `exec claude`.

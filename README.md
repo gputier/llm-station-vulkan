@@ -25,7 +25,7 @@ and Vulkan needs no toolchain.
 ## Model served
 
 ```powershell
-.\llm-ctl.ps1 qwen3vl4b
+.\llm-ctl.ps1 -Action qwen3vl4b
 ```
 
 | | |
@@ -43,69 +43,107 @@ them costs nothing and makes a re-run possible. See
 Two models are **barred** on this box: an earlier 9B froze the whole machine
 during a benchmark and only a physical power cycle brought it back.
 
+## A second profile, for API work rather than dialogue
+
+`vlthink` serves the **Thinking edition of the same Qwen3-VL-4B**, same quantiser
+and same footprint, so a bench against `qwen3vl4b` isolates one variable. It
+exists for a different job: reading mail over the API, deciding what deserves an
+answer, calling a tool for a fact it does not have. Here the thinking phase is
+the point, not a latency to work around.
+
+```powershell
+.\llm-ctl.ps1 -Action vlthink
+```
+
+Three flags none of the other five carry, and each earns its place:
+
+| Flag | Why |
+|---|---|
+| `--jinja` | Without it llama.cpp ignores the model's own template: tool calls are never parsed and thinking tags never recognised |
+| `--reasoning-format deepseek` | Thoughts go to `message.reasoning_content`, the answer stays alone in `message.content`. A caller wants the verdict, not the deliberation |
+| `-cram 8192` | 8 GiB of host-side prompt cache. This is not the context, see the measurement below |
+
+Window is 32,768, not the model's native 256K and not the 81,920 of the Instruct
+profile. On this card prompt processing decays as the window fills, so window
+size is the first performance setting, ahead of any sampling parameter.
+
+Measured on the machine, 2026-09-02:
+
+| | |
+|---|---|
+| VRAM | 5,696 MB of 8,192 |
+| Generation | 73.6 tokens per second |
+| Mail sorted against four imposed rules | 10.8 s, valid JSON, rules respected |
+| Tool choice, two opposite cases | 2 of 2 |
+| Field extraction from an invoice image | 7 of 7, 21.2 s |
+
+The prompt cache is what makes the batch case viable. A stable 1,816-token system
+prompt costs 7.93 s cold, 0.55 s replayed, and **0.82 s with a different mail
+behind it**, 1,789 tokens reused. From one mail to the next the instructions are
+not recomputed.
+
+
 ## Quick start
 
 ```powershell
-# Set the API key first: the script reads it from the environment.
-$env:LLM_API_KEY = "..."
-
-.\llm-ctl.ps1 qwen3vl4b   # start
-.\llm-ctl.ps1 status      # what is loaded
-.\llm-ctl.ps1 stop        # free the GPU
+.\llm-ctl.ps1 -Action qwen3vl4b   # start, returns once /health answers
+.\llm-ctl.ps1 -Action status      # what is loaded, and whether it answers
+.\llm-ctl.ps1 -Action logs        # follow the live log of the running instance
+.\llm-ctl.ps1 -Action stop        # free the GPU
 ```
+
+`-Action` takes a model name or one of `stop`, `status`, `logs`, and nothing
+else: the set is closed by `ValidateSet`, so a typo is refused by name instead of
+being read as an unknown model. `stop` and `logs` accept `-Name` to target one
+instance, `logs` accepts `-Tail`.
 
 From the macOS client:
 
 ```bash
 export LLM_HOST=your-server-hostname-or-ip
 export LLM_SSH_USER=your-ssh-user
-export LLM_API_KEY=the-same-key
 
-./clients/aziz
+./clients/vlthink
 ```
 
-Generate a key with `openssl rand -base64 24`. It is read from the environment
-in both places so it never lands in version control.
-
-## This box is locked down, and the CUDA one is not
-
-That difference is deliberate and worth explaining, because the reasoning
-generalises.
+## What closes the browser path, and what no longer does
 
 The server binds `0.0.0.0`. A firewall protects you from the network but **not
 from the browser case**: any web page open on any machine of the LAN can issue
 requests to a LAN-bound server behind its user's back. Any model handling content
 you would not paste into a public form needs that path closed.
 
-Two settings close it:
+**`--cors-origins ""`**, empty, is what closes it here. No legitimate client of
+this service is a browser, so the right value is not an origin to allow but none
+at all. Verified by execution: the allow-origin header comes back empty, and the
+legitimate call, which presents no origin, still works.
 
-- **`--api-key`**, declared once at the top of the script and reused by all five
-  model blocks, so that a future experiment cannot silently reopen access. Both
-  `Authorization: Bearer` and `x-api-key` are accepted, which leaves client tools
-  a choice. Verified by execution: a request without the key is refused, with it
-  succeeds, and persistence survived three real reboots.
-- **`--cors-origins ""`**, empty. No legitimate client of this service is a
-  browser, so the right value is not an origin to allow but none at all.
-  Verified independently: the allow-origin header comes back empty, and the
-  legitimate call, which presents no origin, still works.
+This box also ran with **`--api-key`** from 2026-08-25 to 2026-09-02. The flag
+was dropped when `llm-ctl.ps1` was rebuilt on the CUDA sibling's model, which has
+never had one. What that costs is worth stating plainly rather than glossing:
+a key also stops a non-browser client on the LAN, a script or a curl, from
+reaching the model. CORS does not. If your threat model includes anything on the
+network besides browsers, put `--api-key` back in the shared argument block
+rather than per model, so that a later experiment cannot silently reopen access.
 
-`/health` stays open without a key on purpose: it is how tools learn the service
-is up before authenticating, and it discloses nothing.
+`/health` and `/props` are both open. The launcher reads `model_path` from
+`/props` to learn which model is loaded, and that probe needs no header.
 
-## Three findings that generalise beyond this box
+## Five findings that generalise beyond this box
 
 ### An empty argument silently corrupts the preceding flag
 
 Found while deploying `--cors-origins ""`. The command-line builder dropped empty
 arguments outright, so the **next** argument slid into the empty one's place.
-The hardening would have been deployed across all five model blocks without
+The hardening would have been deployed across every model block without
 doing what we thought, and reported as done.
 
 It was caught by reading the command line the process was **actually running**,
-not by re-reading the script. The fix is one condition:
+not by re-reading the script. The fix is one condition, now carried by the
+`Quote` function every argument goes through:
 
 ```powershell
-if ($_ -match '\s' -or $_ -eq '') { "`"$_`"" } else { $_ }
+if ($s -eq '' -or $s -match '[\s"]') { return '"' + ($s -replace '"','\"') + '"' }
 ```
 
 ### Redirected stderr stays empty until the process exits
@@ -118,6 +156,31 @@ Use llama.cpp's own `--log-file` flag instead. The process flushes it itself and
 the file stays readable live. This script does that, and the CUDA one does not,
 which is why the CUDA one has an explicit note telling you which log file is the
 real one.
+
+### The GPU counter you need is in Windows, not in the vendor's tool
+
+Relaunching a model too soon after stopping one lands on a card that has not
+finished handing its memory back: `Stop-Process` returns as soon as the process
+is marked dead, but the driver frees device memory asynchronously. The CUDA
+sibling waits for the reading to settle by polling `nvidia-smi`. There is no AMD
+equivalent on Windows, and ROCm does not cover this card at all, RDNA1 having
+been dropped from its support list.
+
+The reading exists anyway, one level down. WDDM publishes it as a performance
+counter, so it is there for **any** graphics card:
+
+```powershell
+(Get-Counter '\GPU Adapter Memory(*)\Dedicated Usage').CounterSamples
+```
+
+Two details make it usable. The counter names stay **English on a non-English
+Windows**, verified here on `fr-FR`, so no culture-dependent lookup is needed.
+And the set returns one instance per adapter, of which only one is the discrete
+card, so the samples have to be summed rather than picked; the idle adapters
+report zero.
+
+> When a vendor tool has no counterpart on the other vendor, look for the same
+> figure in the operating system before concluding the feature cannot be ported.
 
 ### A prefix cache is destroyed by one changed character at the top
 
@@ -158,7 +221,7 @@ look identical from the client and call for opposite fixes.
 | File | What it covers |
 |---|---|
 | [docs/prerequisites.md](docs/prerequisites.md) | What to install, and why there is no build step |
-| [docs/claude-code-integration.md](docs/claude-code-integration.md) | Pointing Claude Code at this server, with an API key |
+| [docs/claude-code-integration.md](docs/claude-code-integration.md) | Pointing Claude Code at this server, and what an 8 GB window changes |
 | [models/qwen3-vl-4b/README.md](models/qwen3-vl-4b/README.md) | The served model and the four measured candidates |
 | [clients/](clients/) | The launcher script |
 

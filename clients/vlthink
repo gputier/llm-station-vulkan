@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
-# aziz - launch Claude Code against the local Qwen3-VL-4B-Instruct server on
+# vlthink - launch Claude Code against the local Qwen3-VL-4B Thinking server on
 # the Vulkan box.
+#
+# READ THIS FIRST. On an RDNA1 card, opening a session costs roughly half an
+# hour before the first word, and that is not a defect to be fixed: Claude Code
+# sends ~35000 tokens of instructions at every start, and this class of card
+# ingests them on a collapsing curve. Measured 2026-09-02 on an RX 5700 XT:
+# 340 tokens per second at 2048 ingested, 173 at 4096, 81 at 8192, 51 at 12288.
+#
+# Every lever was tried the same day and none moved it past measurement noise
+# (7% spread against 8% variance): engine updated 154 builds, prefill batch
+# swept, flash attention re-tested. The cause is the hardware. RDNA1 has no
+# matrix units, so prompt processing runs on scalar shaders; cooperative-matrix
+# support starts at RDNA3.
+#
+# The cost is paid ONCE per session; later turns answer in seconds. For the job
+# this profile is meant for, API-driven mail work, the same server is quick:
+# 1.6 s on a short mail, 2.9 s with an invoice image.
 #
 # No translation proxy involved: the llama.cpp Vulkan build serving this model
 # exposes a native Anthropic-compatible /v1/messages endpoint. Only the base URL
@@ -15,18 +31,14 @@ HOST="${LLM_HOST:-llm-server.local}"
 PORT="8080"
 BASE="http://${HOST}:${PORT}"
 SSH_TARGET="${LLM_SSH_USER:-youruser}@${HOST}"
-# llama-server on this box now requires its own API key (both x-api-key and
-# Authorization: Bearer are accepted; verified 2026-08-25). /health stays open
-# without it, but /props does not, so every /props probe below needs it too.
-API_KEY="${LLM_API_KEY:?set LLM_API_KEY to the --api-key value used by llama-server}"
-CTL='D:\LLM-Setup\llm-ctl.ps1'
-ACTION="qwen3vl4b"
+CTL'D:\LLM-Setup\llm-ctl.ps1'
+ACTION="vlthink"
 LOAD_TIMEOUT=180
 
 # Matched against model_path from /props. Qwen3.5-9B and Qwen3.8-9B also sit on
 # that box and are both barred: the first froze the whole machine on 2026-08-24
 # and only a physical power cycle brought it back.
-MODEL_MATCH="qwen3vl-4b"
+MODEL_MATCH="thinking"
 
 # The server's window, and it must match the -c flag llama-server was started
 # with. Claude Code's own prompt measures ~44_000 tokens without MCP, so any
@@ -38,7 +50,7 @@ MODEL_MATCH="qwen3vl-4b"
 # cache and 1_077 MiB of VRAM still free after a full-screen image goes through.
 # The next step up, 98_304, left only 477 MiB and was rejected: VRAM exhaustion
 # is what freezes this machine.
-CONTEXT_TOKENS=81920
+CONTEXT_TOKENS=65536
 
 err() { printf '%s\n' "$*" >&2; }
 
@@ -47,23 +59,23 @@ is_up() { curl -sS -m 3 "${BASE}/health" 2>/dev/null | grep -q '"status":"ok"'; 
 # Health answers ok even when no model is servable and whatever model sits on the
 # port, so it proves nothing on its own: read model_path from /props.
 loaded_model() {
-  curl -sS -m 3 -H "Authorization: Bearer ${API_KEY}" "${BASE}/props" 2>/dev/null \
+  curl -sS -m 3 "${BASE}/props" 2>/dev/null \
     | sed -n 's/.*"model_path":"\([^"]*\)".*/\1/p'
 }
 
-is_aziz() { loaded_model | grep -qi "$MODEL_MATCH"; }
+is_vlthink() { loaded_model | grep -qi "$MODEL_MATCH"; }
 
 # A scheduled task starts the server at boot, so an absent server means it died
 # or was stopped by hand. llm-ctl.ps1 brings it back without touching the box.
-load_aziz() {
-  err "Loading Qwen3-VL-4B on ${HOST}..."
+load_vlthink() {
+  err "Loading Qwen3-VL-4B Thinking on ${HOST}..."
   ssh -o ConnectTimeout=10 "$SSH_TARGET" \
     "powershell -NoProfile -ExecutionPolicy Bypass -File ${CTL} -Action ${ACTION}" >&2
 
   local waited=0
   while (( waited < LOAD_TIMEOUT )); do
-    if is_up && is_aziz; then
-      err "Qwen3-VL-4B ready."
+    if is_up && is_vlthink; then
+      err "Qwen3-VL-4B Thinking ready."
       return 0
     fi
     sleep 5
@@ -76,20 +88,19 @@ load_aziz() {
 }
 
 if ! is_up; then
-  load_aziz
-elif ! is_aziz; then
+  load_vlthink
+elif ! is_vlthink; then
   err "Port ${PORT} is serving $(loaded_model | sed 's/.*\\//'), not ${MODEL_MATCH}."
-  read -r -p "Replace it with Qwen3-VL-4B? [y/N] " answer
+  read -r -p "Replace it with Qwen3-VL-4B Thinking? [y/N] " answer
   [[ "$answer" =~ ^[yY]$ ]] || { err "Aborted."; exit 1; }
-  load_aziz
+  load_vlthink
 fi
 
 # AUTH_TOKEN and not API_KEY: the latter triggers Claude Code's custom-key
-# approval prompt. llama-server now runs with --api-key set (Windows box moved
-# off the "any bearer accepted" state on 2026-08-25); it checks the
-# Authorization: Bearer header this produces (verified working against x-api-key
-# too, but Bearer is what AUTH_TOKEN sends).
-export ANTHROPIC_AUTH_TOKEN="$API_KEY"
+# approval prompt. The value itself is never checked. This server ran with
+# --api-key from 2026-08-25 to 2026-09-02; the flag was dropped when llm-ctl.ps1
+# was rebuilt on the CUDA sibling's model, which has no key either.
+export ANTHROPIC_AUTH_TOKEN="local"
 export ANTHROPIC_BASE_URL="$BASE"
 
 # Every model id resolves to the single loaded model, but naming them keeps the

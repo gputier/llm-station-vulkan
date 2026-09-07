@@ -7,23 +7,23 @@ only the base URL is redirected and no translation proxy is involved.
 
 This page covers only what differs here.
 
-## The API key is mandatory
+## The token still has to be set, and its value does not matter
 
-This server runs with `--api-key`, so the client must present it:
+The server takes no key. The launcher still exports a placeholder token, so that
+the client has a credential to send and never falls back to prompting for one:
 
 ```bash
-export ANTHROPIC_AUTH_TOKEN="$LLM_API_KEY"
+export ANTHROPIC_AUTH_TOKEN="local"
 ```
 
 Still `ANTHROPIC_AUTH_TOKEN` and **not** `ANTHROPIC_API_KEY`: the latter triggers
 Claude Code's custom-key approval prompt. `AUTH_TOKEN` is sent as
-`Authorization: Bearer`, which llama.cpp accepts alongside `x-api-key`. Both were
-verified working against this server.
+`Authorization: Bearer`, which this server ignores.
 
-Consequence for the launcher: `/props` is **not** reachable without the key,
-while `/health` is. Every probe that reads `model_path` has to carry the
-authorisation header, which is the one place the CUDA launchers and this one
-genuinely differ.
+This box ran with `--api-key` from 2026-08-25 to 2026-09-02, which made `/props`
+unreachable without a header while `/health` stayed open, and forced the launcher
+to carry the credential into every probe. That is gone: both endpoints are open
+and the launcher is now identical to the CUDA ones on this point.
 
 ## A smaller window changes what matters
 
